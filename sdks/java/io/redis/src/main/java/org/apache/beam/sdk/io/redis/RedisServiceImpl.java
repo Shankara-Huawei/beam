@@ -21,6 +21,8 @@ import java.util.Iterator;
 import java.util.LinkedList;
 import java.util.List;
 import java.util.NoSuchElementException;
+import java.util.Set;
+
 import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.values.KV;
 
@@ -135,33 +137,28 @@ public class RedisServiceImpl implements RedisService {
   }
 
   /**
-   * The estimate size bytes is based on sampling, computing average size of 10 random
-   * key/value pairs. This sampling average size is used with the Redis dbSize to get an
-   * estimation of the actual database size.
+   * The estimate size bytes retrieves all keys from the database (no other way to add an accurate
+   * estimation) and sum the value bytes length.
    */
   @Override
-  public long getEstimatedSizeBytes() {
+  public long getEstimatedSizeBytes(String keyPattern) {
     Jedis jedis = connection.connect();
-    // estimate the size of a key/value pair using sampling
-    long samplingSize = 0;
+    long size = 0;
     try {
-      for (int i = 0; i < 10; i++) {
-        String key = jedis.randomKey();
-        if (key != null) {
-          samplingSize = samplingSize + key.getBytes().length;
-          String value = jedis.get(key);
-          if (value != null) {
-            samplingSize = samplingSize + value.getBytes().length;
-          }
+      Set<String> keys = jedis.keys(keyPattern);
+      for (String key : keys) {
+        try {
+          byte[] value = jedis.get(key).getBytes();
+          size = size + value.length;
+        } catch (Exception e) {
+          e.printStackTrace();
+          // TODO use hgetAll() ?
         }
       }
-      long samplingAverage = samplingSize / 10;
-      // db size
-      long dbSize = jedis.dbSize();
-      return dbSize * samplingAverage;
     } finally {
       jedis.quit();
     }
+    return size;
   }
 
   @Override

@@ -30,6 +30,7 @@ import java.util.List;
 
 import javax.annotation.Nullable;
 
+import org.apache.beam.sdk.annotations.Experimental;
 import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
@@ -65,6 +66,7 @@ import org.slf4j.LoggerFactory;
  *
  * }</pre>
  */
+@Experimental(Experimental.Kind.SOURCE_SINK)
 public class RedisIO {
 
   private static final Logger LOG = LoggerFactory.getLogger(RedisIO.class);
@@ -224,17 +226,9 @@ public class RedisIO {
       return Collections.singletonList(this);
     }
 
-    /**
-     * The estimate size bytes is based on sampling, computing average size of 10 random
-     * key/value pairs. This sampling average size is used with the Redis dbSize to get an
-     * estimation of the actual database size.
-     *
-     * @param pipelineOptions The pipeline options.
-     * @return The estimated size of the Redis database in bytes.
-     */
     @Override
     public long getEstimatedSizeBytes(PipelineOptions pipelineOptions) throws IOException {
-      return serviceFactory.apply(pipelineOptions).getEstimatedSizeBytes();
+      return serviceFactory.apply(pipelineOptions).getEstimatedSizeBytes(keyPattern);
     }
 
     @Override

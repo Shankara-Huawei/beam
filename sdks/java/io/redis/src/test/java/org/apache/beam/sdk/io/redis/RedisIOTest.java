@@ -108,7 +108,7 @@ public class RedisIOTest {
           .create()
           .withHost("localhost")
           .withPort(embeddedRedis.getPort());
-      RedisIO.RedisSource source = new RedisIO.RedisSource("Foo.*",
+      RedisIO.RedisSource source = new RedisIO.RedisSource("Foo*",
           new SerializableFunction<PipelineOptions, RedisService>() {
             @Override
             public RedisService apply(PipelineOptions input) {
@@ -117,7 +117,7 @@ public class RedisIOTest {
           }, null);
       long estimatedSizeBytes = source.getEstimatedSizeBytes(pipelineOptions);
       LOG.info("Estimated size: {}", estimatedSizeBytes);
-      assertEquals(100, estimatedSizeBytes);
+      assertEquals(50, estimatedSizeBytes);
     }
   }
 
@@ -281,7 +281,7 @@ public class RedisIOTest {
     }
 
     @Override
-    public long getEstimatedSizeBytes() {
+    public long getEstimatedSizeBytes(String keyPattern) {
       long size = 0L;
       for (String key : store.keySet()) {
         String value = store.get(key);

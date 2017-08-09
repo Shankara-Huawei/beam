@@ -36,8 +36,10 @@ interface RedisService extends Serializable {
 
   /**
    * Return an estimation of the size that could be read.
+   *
+   * @param keyPattern The pattern to select the keys.
    */
-  long getEstimatedSizeBytes();
+  long getEstimatedSizeBytes(String keyPattern);
 
   /**
    * Return true if the Redis instance support cluster, false, else.
