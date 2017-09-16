@@ -21,29 +21,29 @@ import static com.google.common.base.Preconditions.checkArgument;
 import static com.google.common.base.Preconditions.checkState;
 
 import com.google.auto.value.AutoValue;
-import com.google.common.annotations.VisibleForTesting;
 
-import java.io.IOException;
-import java.util.ArrayList;
-import java.util.Collections;
 import java.util.List;
 
 import javax.annotation.Nullable;
 
 import org.apache.beam.sdk.annotations.Experimental;
-import org.apache.beam.sdk.coders.Coder;
 import org.apache.beam.sdk.coders.KvCoder;
 import org.apache.beam.sdk.coders.StringUtf8Coder;
-import org.apache.beam.sdk.io.BoundedSource;
 import org.apache.beam.sdk.options.PipelineOptions;
+import org.apache.beam.sdk.transforms.Create;
+import org.apache.beam.sdk.transforms.DoFn;
 import org.apache.beam.sdk.transforms.PTransform;
-import org.apache.beam.sdk.transforms.SerializableFunction;
+import org.apache.beam.sdk.transforms.ParDo;
 import org.apache.beam.sdk.transforms.display.DisplayData;
 import org.apache.beam.sdk.values.KV;
 import org.apache.beam.sdk.values.PBegin;
 import org.apache.beam.sdk.values.PCollection;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import redis.clients.jedis.Jedis;
+import redis.clients.jedis.Pipeline;
+import redis.clients.jedis.ScanParams;
+import redis.clients.jedis.ScanResult;
 
 /**
  * An IO to manipulate Redis key/value database.
@@ -71,22 +71,32 @@ public class RedisIO {
 
   private static final Logger LOG = LoggerFactory.getLogger(RedisIO.class);
 
+  /**
+   * Read data from a Redis server.
+   */
   public static Read read() {
-    return new  AutoValue_RedisIO_Read.Builder().setKeyPattern("*").build();
+    return new AutoValue_RedisIO_Read.Builder().setKeyPattern("*").build();
+  }
+
+  /**
+   * Like {@link #read()} but executes multiple instances of the Redis query substituting each
+   * element of a {@link PCollection} as key pattern.
+   */
+  public static ReadAll readAll() {
+    return new AutoValue_RedisIO_ReadAll.Builder().build();
   }
 
   private RedisIO() {
   }
 
   /**
-   * A {@link PTransform} reading key/value pairs from a Redis database.
+   * Implementation of {@link #read()}.
    */
   @AutoValue
   public abstract static class Read extends PTransform<PBegin, PCollection<KV<String, String>>> {
 
     @Nullable abstract RedisConnectionConfiguration connectionConfiguration();
     @Nullable abstract String keyPattern();
-    @Nullable abstract RedisService redisService();
 
     abstract Builder builder();
 
@@ -95,7 +105,6 @@ public class RedisIO {
       @Nullable abstract Builder setConnectionConfiguration(
           RedisConnectionConfiguration connection);
       @Nullable abstract Builder setKeyPattern(String keyPattern);
-      @Nullable abstract Builder setRedisService(RedisService redisService);
       abstract Read build();
     }
 
@@ -111,39 +120,17 @@ public class RedisIO {
       return builder().setConnectionConfiguration(connection).build();
     }
 
-    /**
-     * Define the pattern of the Redis keys to retrieve.
-     *
-     * @param keyPattern The Redis key pattern.
-     * @return The corresponding {@link Read} {@link PTransform}.
-     */
     public Read withKeyPattern(String keyPattern) {
-      checkArgument(keyPattern != null, "RedisIO.read().withKeyPattern(keyPattern) called with "
-          + "null keyPattern");
+      checkArgument(keyPattern != null, "RedisIO.read().withKeyPattern(keyPattern)"
+          + "called with null keyPattern");
       return builder().setKeyPattern(keyPattern).build();
-    }
-
-    /**
-     * Allows the user to specify its own {@link RedisService}. A {@link RedisService} is
-     * responsible of reading and writing data with the Redis backend.
-     *
-     * @param redisService The {@link RedisService} to use.
-     * @return The corresponding {@link Read} {@link PTransform}.
-     */
-    public Read withRedisService(RedisService redisService) {
-      checkArgument(redisService != null, "RedisIO.read().withRedisService(service) called with"
-          + " null service");
-      return builder().setRedisService(redisService).build();
     }
 
     @Override
     public void validate(PipelineOptions pipelineOptions) {
-      checkState(connectionConfiguration() != null || redisService() != null,
+      checkState(connectionConfiguration() != null,
           "RedisIO.read() requires a connectionConfiguration to be set "
-              + "withConnection(connectionConfiguration) or a service to be set withRedisService"
-              + "(service)");
-      checkState(keyPattern() != null, "RedisIO.read() requires a key pattern to be set "
-          + "withKeyPattern(keyPattern)");
+              + "withConnection(connectionConfiguration)");
     }
 
     @Override
@@ -151,99 +138,103 @@ public class RedisIO {
       if (connectionConfiguration() != null) {
         connectionConfiguration().populateDisplayData(builder);
       }
-      builder.add(DisplayData.item("keyPattern", keyPattern()));
     }
 
     @Override
     public PCollection<KV<String, String>> expand(PBegin input) {
-      return input.getPipeline()
-          .apply(org.apache.beam.sdk.io.Read.from(
-              new RedisSource(
-                  keyPattern(),
-                  new SerializableFunction<PipelineOptions, RedisService>() {
-                    @Override
-                    public RedisService apply(PipelineOptions pipelineOptions) {
-                      return getRedisService(pipelineOptions);
-                    }
-                  }, null)));
-    }
-
-    /**
-     * Helper function to either get a fake/mock Redis service provided by
-     * {@link #withRedisService(RedisService)} or creates and returns an implementation of a
-     * concrete Redis service dealing with an actual Redis server.
-     */
-    @VisibleForTesting
-    RedisService getRedisService(PipelineOptions pipelineOptions) {
-      if (redisService() != null) {
-        return redisService();
-      }
-      return new RedisServiceImpl(connectionConfiguration());
+      return input
+          .apply(Create.of(keyPattern()))
+          .apply(RedisIO.readAll().withConnectionConfiguration(connectionConfiguration()));
     }
 
   }
 
   /**
-   * A bounded source reading key-value pairs from a Redis server.
+   * Implementation of {@link #readAll()}.
    */
-  @VisibleForTesting
-  protected static class RedisSource extends BoundedSource<KV<String, String>> {
+  @AutoValue
+  public abstract static class ReadAll
+      extends PTransform<PCollection<String>, PCollection<KV<String, String>>> {
 
-    protected final String keyPattern;
-    private final SerializableFunction<PipelineOptions, RedisService> serviceFactory;
-    protected final RedisService.RedisNode node;
+    @Nullable abstract RedisConnectionConfiguration connectionConfiguration();
 
-    protected RedisSource(String keyPattern,
-                          SerializableFunction<PipelineOptions, RedisService> serviceFactory,
-                          RedisService.RedisNode node) {
-      this.keyPattern = keyPattern;
-      this.serviceFactory = serviceFactory;
-      this.node = node;
+    abstract ReadAll.Builder builder();
+
+    @AutoValue.Builder
+    abstract static class Builder {
+      @Nullable abstract ReadAll.Builder setConnectionConfiguration(
+          RedisConnectionConfiguration connection);
+      abstract ReadAll build();
+    }
+
+    public ReadAll withConnectionConfiguration(RedisConnectionConfiguration connection) {
+      checkArgument(connection != null, "RedisIO.read().withConnectionConfiguration"
+          + "(connectionConfiguration) called with null connectionConfiguration");
+      return builder().setConnectionConfiguration(connection).build();
     }
 
     @Override
-    public List<RedisSource> split(long desiredBundleSizeBytes,
-                                              PipelineOptions pipelineOptions) throws IOException {
-      if (serviceFactory.apply(pipelineOptions).isClusterEnabled()) {
-        LOG.info("Cluster detected");
-        List<RedisSource> redisSources = new ArrayList<>();
+    public PCollection<KV<String, String>> expand(PCollection<String> input) {
+      return input
+          .apply(ParDo.of(
+              new ReadFn(connectionConfiguration())
+          ))
+          .setCoder(KvCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of()));
+      // reparallelized ?
+    }
 
-        List<RedisService.RedisNode> nodes = serviceFactory.apply(pipelineOptions)
-            .getClusterNodes();
+  }
 
-        int slot = serviceFactory.apply(pipelineOptions).getKeySlot(keyPattern);
+  /**
+   * A {@link DoFn} requesting Redis server to get key/value pairs.
+   */
+  private static class ReadFn extends DoFn<String, KV<String, String>> {
 
-        for (RedisService.RedisNode node : nodes) {
-          if (node.startSlot <= slot && slot < node.endSlot) {
-            redisSources.add(new RedisSource(keyPattern, serviceFactory, node));
+    private final RedisConnectionConfiguration connectionConfiguration;
+
+    private transient Jedis jedis;
+
+    public ReadFn(RedisConnectionConfiguration connectionConfiguration) {
+      this.connectionConfiguration = connectionConfiguration;
+    }
+
+    @Setup
+    public void setup() {
+      jedis = connectionConfiguration.connect();
+    }
+
+    @ProcessElement
+    public void processElement(ProcessContext processContext) throws Exception {
+      ScanParams scanParams = new ScanParams();
+      scanParams.match(processContext.element());
+
+      String cursor = ScanParams.SCAN_POINTER_START;
+      boolean finished = false;
+      while (!finished) {
+        ScanResult<String> scanResult = jedis.scan(cursor, scanParams);
+        List<String> keys = scanResult.getResult();
+
+        Pipeline pipeline = jedis.pipelined();
+        if (keys != null) {
+          for (String key : keys) {
+            pipeline.get(key);
+          }
+          List<Object> values = pipeline.syncAndReturnAll();
+          for (int i = 0; i < values.size(); i++) {
+            processContext.output(KV.of(keys.get(i), (String) values.get(i)));
           }
         }
 
-        return redisSources;
+        cursor = scanResult.getStringCursor();
+        if (cursor.equals("0")) {
+          finished = true;
+        }
       }
-      LOG.info("Standalone instance detected, use a single source");
-      // we don't have Redis cluster, so, we use an unique source
-      return Collections.singletonList(this);
     }
 
-    @Override
-    public long getEstimatedSizeBytes(PipelineOptions pipelineOptions) throws IOException {
-      return serviceFactory.apply(pipelineOptions).getEstimatedSizeBytes(keyPattern);
-    }
-
-    @Override
-    public BoundedReader<KV<String, String>> createReader(PipelineOptions pipelineOptions) {
-      return serviceFactory.apply(pipelineOptions).createReader(this);
-    }
-
-    @Override
-    public void validate() {
-      // done in the Read
-    }
-
-    @Override
-    public Coder<KV<String, String>> getDefaultOutputCoder() {
-      return KvCoder.of(StringUtf8Coder.of(), StringUtf8Coder.of());
+    @Teardown
+    public void teardown() {
+      jedis.close();
     }
 
   }

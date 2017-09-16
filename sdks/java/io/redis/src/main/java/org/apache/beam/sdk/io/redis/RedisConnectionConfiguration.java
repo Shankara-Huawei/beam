@@ -22,9 +22,6 @@ import static com.google.common.base.Preconditions.checkArgument;
 import com.google.auto.value.AutoValue;
 
 import java.io.Serializable;
-import java.util.ArrayList;
-import java.util.Collections;
-import java.util.List;
 
 import javax.annotation.Nullable;
 
@@ -32,7 +29,6 @@ import org.apache.beam.sdk.transforms.display.DisplayData;
 
 import redis.clients.jedis.Jedis;
 import redis.clients.jedis.Protocol;
-import redis.clients.util.SafeEncoder;
 
 /**
  * {@code RedisConnectionConfiguration} describes and wraps a connectionConfiguration to Redis
@@ -135,60 +131,5 @@ public abstract class RedisConnectionConfiguration implements Serializable {
     builder.addIfNotNull(DisplayData.item("port", port()));
     builder.addIfNotNull(DisplayData.item("timeout", timeout()));
   }
-
-  public List<RedisService.RedisNode> getNodes() {
-    if (this.isClusterEnabled()) {
-      return getClusterNodes();
-    }
-    return Collections.emptyList();
-  }
-
-  public List<RedisService.RedisNode> getClusterNodes() {
-    try (Jedis jedis = connect()) {
-      // cluster slots is an array containing for each slot
-      // - start slot range
-      // - end slot range
-      // - master for slot range represented as nested IP/port array
-      // - first replica of master for slot range
-      // - second replica
-      // - ...continues until all replicas for this master are returned
-      // See https://redis.io/commands/cluster-slots for details
-      List<Object> slots = jedis.clusterSlots();
-
-      for (Object slotInfoObj : slots) {
-        List<Object> slotInfo = (List<Object>) slotInfoObj;
-
-        int startSlot = Integer.parseInt((String) slotInfo.get(0));
-        int endSlot = Integer.parseInt((String) slotInfo.get(1));
-
-        if (slotInfo.size() <= MASTER_NODE_INDEX) {
-          continue;
-        }
-
-        // host infos
-        int size = slotInfo.size();
-        for (int i = MASTER_NODE_INDEX; i < size; i++) {
-          List<Object> hostInfos = (List<Object>) slotInfo.get(i);
-          if (hostInfos.size() <= 0) {
-            continue;
-          }
-
-          RedisService.RedisNode node = new RedisService.RedisNode();
-          node.host = SafeEncoder.encode((byte[]) hostInfos.get(0));
-          node.port = Integer.parseInt(hostInfos.get(1).toString());
-          node.timeout = timeout();
-          node.startSlot = startSlot;
-          node.endSlot = endSlot;
-          node.index = i;
-          node.size = slotInfo.size() - 2;
-          nodes.add(node);
-        }
-      }
-    }
-    return nodes;
-  }
-
-  private final List<RedisService.RedisNode> nodes = new ArrayList<>();
-
 
 }
